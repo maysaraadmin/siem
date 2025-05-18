@@ -1,14 +1,10 @@
-from datetime import datetime
-from typing import List, Dict, Any
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Tuple, Optional
 from .database import Database
 
 class EventModel:
     def __init__(self, db: Database):
         self.db = db
-        # Add this new method
-    def get_events_with_query(self, query: str, params: tuple = ()) -> List[tuple]:
-        """Execute a custom query to get events"""
-        return self.db.execute_query(query, params)
         
     def create_event(
         self,
@@ -29,6 +25,85 @@ class EventModel:
         self.db.execute_update(query, params)
         return self.db.cursor.lastrowid
     
+    def get_events_over_time(self, time_delta: timedelta) -> List[Tuple[str, int]]:
+        """Get event counts grouped by time intervals"""
+        if time_delta <= timedelta(hours=24):
+            # Hourly grouping for 24 hours
+            query = """
+                SELECT strftime('%Y-%m-%d %H:00', timestamp) as time_interval, 
+                       COUNT(*) as count 
+                FROM events 
+                WHERE timestamp >= datetime('now', ?) 
+                GROUP BY time_interval 
+                ORDER BY time_interval
+            """
+            param = f"-{int(time_delta.total_seconds()/3600)} hours"
+        elif time_delta <= timedelta(days=7):
+            # Daily grouping for 7 days
+            query = """
+                SELECT strftime('%Y-%m-%d', timestamp) as time_interval, 
+                       COUNT(*) as count 
+                FROM events 
+                WHERE timestamp >= datetime('now', ?) 
+                GROUP BY time_interval 
+                ORDER BY time_interval
+            """
+            param = f"-{time_delta.days} days"
+        else:
+            # Weekly grouping for longer ranges
+            query = """
+                SELECT strftime('%Y-%m-%d', date(timestamp, 'weekday 0', '-6 days')) as time_interval, 
+                       COUNT(*) as count 
+                FROM events 
+                WHERE timestamp >= datetime('now', ?) 
+                GROUP BY time_interval 
+                ORDER BY time_interval
+            """
+            param = f"-{time_delta.days} days"
+        
+        return self.db.execute_query(query, (param,))
+    
+    def get_event_sources(self, time_delta: timedelta) -> List[Tuple[str, int]]:
+        """Get event counts by source"""
+        query = """
+            SELECT source, COUNT(*) as count 
+            FROM events 
+            WHERE timestamp >= datetime('now', ?) 
+            GROUP BY source 
+            ORDER BY count DESC
+        """
+        param = f"-{int(time_delta.total_seconds()/3600)} hours" if time_delta <= timedelta(hours=24) else f"-{time_delta.days} days"
+        return self.db.execute_query(query, (param,))
+    
+    def get_severity_trends(self, time_delta: timedelta) -> List[Tuple[str, int, int]]:
+        """Get severity counts over time"""
+        if time_delta <= timedelta(hours=24):
+            # Hourly grouping
+            query = """
+                SELECT strftime('%Y-%m-%d %H:00', timestamp) as time_interval,
+                       severity,
+                       COUNT(*) as count
+                FROM events
+                WHERE timestamp >= datetime('now', ?)
+                GROUP BY time_interval, severity
+                ORDER BY time_interval, severity
+            """
+            param = f"-{int(time_delta.total_seconds()/3600)} hours"
+        else:
+            # Daily grouping
+            query = """
+                SELECT strftime('%Y-%m-%d', timestamp) as time_interval,
+                       severity,
+                       COUNT(*) as count
+                FROM events
+                WHERE timestamp >= datetime('now', ?)
+                GROUP BY time_interval, severity
+                ORDER BY time_interval, severity
+            """
+            param = f"-{time_delta.days} days"
+        
+        return self.db.execute_query(query, (param,))
+
     def get_events(
         self,
         source_filter: str = None,
@@ -109,5 +184,33 @@ class EventModel:
         return True
     
     def get_events_with_query(self, query: str, params: tuple = ()) -> List[tuple]:
-    """Execute a custom query to get events"""
-    return self.db.execute_query(query, params)
+        """Execute a custom query to get events"""
+        return self.db.execute_query(query, params)
+    
+    def get_event_by_id(self, event_id: int) -> Optional[Dict]:
+        """Get a single event by its ID"""
+        query = """
+            SELECT id, timestamp, source, event_type, severity, 
+                   description, ip_address, status 
+            FROM events 
+            WHERE id = ?
+        """
+        result = self.db.execute_query(query, (event_id,))
+        if result:
+            return {
+                'id': result[0][0],
+                'timestamp': result[0][1],
+                'source': result[0][2],
+                'event_type': result[0][3],
+                'severity': result[0][4],
+                'description': result[0][5],
+                'ip_address': result[0][6],
+                'status': result[0][7]
+            }
+        return None
+    
+    def update_event_status(self, event_id: int, new_status: str) -> bool:
+        """Update an event's status"""
+        query = "UPDATE events SET status = ? WHERE id = ?"
+        self.db.execute_update(query, (new_status, event_id))
+        return True
