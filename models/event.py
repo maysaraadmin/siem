@@ -5,6 +5,10 @@ from .database import Database
 class EventModel:
     def __init__(self, db: Database):
         self.db = db
+        # Add this new method
+    def get_events_with_query(self, query: str, params: tuple = ()) -> List[tuple]:
+        """Execute a custom query to get events"""
+        return self.db.execute_query(query, params)
         
     def create_event(
         self,
@@ -103,3 +107,7 @@ class EventModel:
         query = "UPDATE events SET status = 'Resolved' WHERE id = ?"
         self.db.execute_update(query, (event_id,))
         return True
+    
+    def get_events_with_query(self, query: str, params: tuple = ()) -> List[tuple]:
+    """Execute a custom query to get events"""
+    return self.db.execute_query(query, params)

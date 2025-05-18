@@ -7,6 +7,11 @@ class Database:
         self.conn: Optional[sqlite3.Connection] = None
         self.cursor: Optional[sqlite3.Cursor] = None
         
+    def execute_query(self, query: str, params: tuple = ()):
+        """Execute a SQL query and return results"""
+        self.cursor.execute(query, params)
+        return self.cursor.fetchall()  
+         
     def connect(self):
         """Establish database connection"""
         self.conn = sqlite3.connect(self.db_name)
