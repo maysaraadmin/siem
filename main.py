@@ -3,7 +3,7 @@ from tkinter import ttk
 from models.database import Database
 from models.event import EventModel
 from models.rule import RuleModel
-from models.log_collector import LogCollector
+from models.windows_log_collector import WindowsLogCollector
 from views.dashboard_view import DashboardView
 from views.events_view import EventsView
 from views.rules_view import RulesView
@@ -22,14 +22,11 @@ class SIEMSystem:
         
         self.event_model = EventModel(self.db)
         self.rule_model = RuleModel(self.db)
-        self.log_collector = LogCollector(self.event_model)
+        self.WindowsLogCollector = WindowsLogCollector(self.event_model)
         
         # Create GUI
         self._create_ui()
-        
-        # Start log collection
-        self.log_collector.start()
-        
+            
     def _create_ui(self):
         """Create the main application UI"""
         # Create main notebook (tabs)
@@ -52,10 +49,19 @@ class SIEMSystem:
         
     def on_closing(self):
         """Handle application shutdown"""
-        self.log_collector.stop()
+        self.WindowsLogCollector.stop()
         self.db.close()
         self.root.destroy()
-
+    def start(self):
+        """Start all collectors"""
+        self.windows_collector.start()
+        # Start other collectors...
+        
+    def stop(self):
+        """Stop all collectors"""
+        self.windows_collector.stop()
+        # Stop other collectors...
+        
 if __name__ == "__main__":
     root = tk.Tk()
     app = SIEMSystem(root)
