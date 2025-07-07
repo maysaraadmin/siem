@@ -1,10 +1,13 @@
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 from .database import Database
+import queue
+import threading
 
 class EventModel:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, root=None):
         self.db = db
+        self.root = root  # Reference to root Tk instance for main thread callbacks
         
     def create_event(
         self,
@@ -22,87 +25,129 @@ class EventModel:
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """
         params = (timestamp, source, event_type, severity, description, ip_address, status)
-        self.db.execute_update(query, params)
-        return self.db.cursor.lastrowid
+        
+        # Get a cursor to execute the query and get the lastrowid
+        with self.db._lock:  # Use the database lock for thread safety
+            conn = self.db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_events_by_source(self, source: str, limit: int = 100) -> List[Tuple]:
+        """
+        Get events filtered by source
+        
+        Args:
+            source: The source to filter by (e.g., 'Sysmon', 'Windows Security')
+            limit: Maximum number of events to return
+            
+        Returns:
+            List of event tuples (id, timestamp, source, event_type, severity, description, ip_address, status)
+        """
+        query = """
+            SELECT id, timestamp, source, event_type, severity, description, ip_address, status
+            FROM events
+            WHERE source = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        try:
+            return self.db.execute_query(query, (source, limit))
+        except Exception as e:
+            print(f"Error in get_events_by_source: {e}")
+            return []
     
     def get_events_over_time(self, time_delta: timedelta) -> List[Tuple[str, int]]:
         """Get event counts grouped by time intervals"""
-        if time_delta <= timedelta(hours=24):
-            # Hourly grouping for 24 hours
-            query = """
-                SELECT strftime('%Y-%m-%d %H:00', timestamp) as time_interval, 
-                       COUNT(*) as count 
-                FROM events 
-                WHERE timestamp >= datetime('now', ?) 
-                GROUP BY time_interval 
-                ORDER BY time_interval
-            """
-            param = f"-{int(time_delta.total_seconds()/3600)} hours"
-        elif time_delta <= timedelta(days=7):
-            # Daily grouping for 7 days
-            query = """
-                SELECT strftime('%Y-%m-%d', timestamp) as time_interval, 
-                       COUNT(*) as count 
-                FROM events 
-                WHERE timestamp >= datetime('now', ?) 
-                GROUP BY time_interval 
-                ORDER BY time_interval
-            """
-            param = f"-{time_delta.days} days"
-        else:
-            # Weekly grouping for longer ranges
-            query = """
-                SELECT strftime('%Y-%m-%d', date(timestamp, 'weekday 0', '-6 days')) as time_interval, 
-                       COUNT(*) as count 
-                FROM events 
-                WHERE timestamp >= datetime('now', ?) 
-                GROUP BY time_interval 
-                ORDER BY time_interval
-            """
-            param = f"-{time_delta.days} days"
-        
-        return self.db.execute_query(query, (param,))
+        try:
+            if time_delta <= timedelta(hours=24):
+                # Hourly grouping for 24 hours
+                query = """
+                    SELECT strftime('%Y-%m-%d %H:00', timestamp) as time_interval, 
+                           COUNT(*) as count 
+                    FROM events 
+                    WHERE timestamp >= datetime('now', ?) 
+                    GROUP BY time_interval 
+                    ORDER BY time_interval
+                """
+                param = f"-{int(time_delta.total_seconds()/3600)} hours"
+            elif time_delta <= timedelta(days=7):
+                # Daily grouping for 7 days
+                query = """
+                    SELECT strftime('%Y-%m-%d', timestamp) as time_interval, 
+                           COUNT(*) as count 
+                    FROM events 
+                    WHERE timestamp >= datetime('now', ?) 
+                    GROUP BY time_interval 
+                    ORDER BY time_interval
+                """
+                param = f"-{time_delta.days} days"
+            else:
+                # Weekly grouping for longer ranges
+                query = """
+                    SELECT strftime('%Y-%m-%d', date(timestamp, 'weekday 0', '-6 days')) as time_interval, 
+                           COUNT(*) as count 
+                    FROM events 
+                    WHERE timestamp >= datetime('now', ?) 
+                    GROUP BY time_interval 
+                    ORDER BY time_interval
+                """
+                param = f"-{time_delta.days} days"
+            
+            return self.db.execute_query(query, (param,))
+        except Exception as e:
+            print(f"Error in get_events_over_time: {e}")
+            return []
     
     def get_event_sources(self, time_delta: timedelta) -> List[Tuple[str, int]]:
         """Get event counts by source"""
-        query = """
-            SELECT source, COUNT(*) as count 
-            FROM events 
-            WHERE timestamp >= datetime('now', ?) 
-            GROUP BY source 
-            ORDER BY count DESC
-        """
-        param = f"-{int(time_delta.total_seconds()/3600)} hours" if time_delta <= timedelta(hours=24) else f"-{time_delta.days} days"
-        return self.db.execute_query(query, (param,))
+        try:
+            query = """
+                SELECT source, COUNT(*) as count 
+                FROM events 
+                WHERE timestamp >= datetime('now', ?) 
+                GROUP BY source 
+                ORDER BY count DESC
+            """
+            param = f"-{int(time_delta.total_seconds()/3600)} hours" if time_delta <= timedelta(hours=24) else f"-{time_delta.days} days"
+            return self.db.execute_query(query, (param,))
+        except Exception as e:
+            print(f"Error in get_event_sources: {e}")
+            return []
     
     def get_severity_trends(self, time_delta: timedelta) -> List[Tuple[str, int, int]]:
         """Get severity counts over time"""
-        if time_delta <= timedelta(hours=24):
-            # Hourly grouping
-            query = """
-                SELECT strftime('%Y-%m-%d %H:00', timestamp) as time_interval,
-                       severity,
-                       COUNT(*) as count
-                FROM events
-                WHERE timestamp >= datetime('now', ?)
-                GROUP BY time_interval, severity
-                ORDER BY time_interval, severity
-            """
-            param = f"-{int(time_delta.total_seconds()/3600)} hours"
-        else:
-            # Daily grouping
-            query = """
-                SELECT strftime('%Y-%m-%d', timestamp) as time_interval,
-                       severity,
-                       COUNT(*) as count
-                FROM events
-                WHERE timestamp >= datetime('now', ?)
-                GROUP BY time_interval, severity
-                ORDER BY time_interval, severity
-            """
-            param = f"-{time_delta.days} days"
-        
-        return self.db.execute_query(query, (param,))
+        try:
+            if time_delta <= timedelta(hours=24):
+                # Hourly grouping
+                query = """
+                    SELECT strftime('%Y-%m-%d %H:00', timestamp) as time_interval,
+                           severity,
+                           COUNT(*) as count
+                    FROM events
+                    WHERE timestamp >= datetime('now', ?)
+                    GROUP BY time_interval, severity
+                    ORDER BY time_interval, severity
+                """
+                param = f"-{int(time_delta.total_seconds()/3600)} hours"
+            else:
+                # Daily grouping
+                query = """
+                    SELECT strftime('%Y-%m-%d', timestamp) as time_interval,
+                           severity,
+                           COUNT(*) as count
+                    FROM events
+                    WHERE timestamp >= datetime('now', ?)
+                    GROUP BY time_interval, severity
+                    ORDER BY time_interval, severity
+                """
+                param = f"-{time_delta.days} days"
+            
+            return self.db.execute_query(query, (param,))
+        except Exception as e:
+            print(f"Error in get_severity_trends: {e}")
+            return []
 
     def get_events(
         self,
@@ -214,3 +259,58 @@ class EventModel:
         query = "UPDATE events SET status = ? WHERE id = ?"
         self.db.execute_update(query, (new_status, event_id))
         return True
+        
+    def get_events_by_time_range(self, start_time: datetime, end_time: datetime) -> List[Tuple]:
+        """Get events within a specific time range"""
+        query = """
+            SELECT id, timestamp, source, event_type, severity, description, ip_address, status
+            FROM events
+            WHERE timestamp BETWEEN ? AND ?
+            ORDER BY timestamp DESC
+        """
+        try:
+            return self.db.execute_query(query, (start_time, end_time))
+        except Exception as e:
+            print(f"Error in get_events_by_time_range: {e}")
+            return []
+    
+    def get_severity_distribution(self) -> List[Tuple[str, int]]:
+        """Get count of events grouped by severity"""
+        query = """
+            SELECT 
+                CASE 
+                    WHEN severity >= 4 THEN 'Critical'
+                    WHEN severity = 3 THEN 'Warning'
+                    ELSE 'Info'
+                END as severity_group,
+                COUNT(*) as count
+            FROM events
+            WHERE timestamp >= datetime('now', '-24 hours')
+            GROUP BY severity_group
+            ORDER BY 
+                CASE 
+                    WHEN severity_group = 'Critical' THEN 1
+                    WHEN severity_group = 'Warning' THEN 2
+                    ELSE 3
+                END
+        """
+        try:
+            return self.db.execute_query(query)
+        except Exception as e:
+            print(f"Error in get_severity_distribution: {e}")
+            return []
+    
+    def get_recent_alerts(self, limit: int = 10) -> List[Tuple]:
+        """Get most recent alerts"""
+        query = """
+            SELECT id, timestamp, source, event_type, severity, description, ip_address, status
+            FROM events
+            WHERE severity >= 3  # Only include warnings and critical
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        try:
+            return self.db.execute_query(query, (limit,))
+        except Exception as e:
+            print(f"Error in get_recent_alerts: {e}")
+            return []

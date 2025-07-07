@@ -157,9 +157,10 @@ class AnalyticsView:
         self.severity_ax.clear()
         
         if severity_data:
-            df = pd.DataFrame(severity_data)
-            df['Time'] = pd.to_datetime(df['Time'])
-            pivot_df = df.pivot(index='Time', columns='Severity', values='Count').fillna(0)
+            # Convert the list of tuples to a DataFrame with proper column names
+            df = pd.DataFrame(severity_data, columns=['time_interval', 'severity', 'count'])
+            df['time_interval'] = pd.to_datetime(df['time_interval'])
+            pivot_df = df.pivot(index='time_interval', columns='severity', values='count').fillna(0)
             
             colors = ['#4CAF50', '#FFC107', '#FF9800', '#F44336', '#9C27B0']
             pivot_df.plot.area(ax=self.severity_ax, legend=True, color=colors, alpha=0.7)

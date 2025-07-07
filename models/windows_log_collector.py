@@ -61,11 +61,13 @@ class WindowsLogCollector:
                 print(f"Failed to start {log_name} collector: {str(e)}")
         
         # Start additional log collectors
-        self.threads.append(threading.Thread(
+        firewall_thread = threading.Thread(
             target=self._collect_firewall_logs,
             daemon=True,
             name="WinLog-Firewall"
-        ).start())
+        )
+        firewall_thread.start()
+        self.threads.append(firewall_thread)
         
         print(f"Started {len(self.threads)} Windows log collectors")
         
@@ -237,33 +239,60 @@ class WindowsLogCollector:
                     continue
                 
                 for event in events:
-                    if min_level and event.EventType < min_level:
-                        continue
-                    
-                    event_id = event.EventID & 0xFFFF
-                    
-                    if event_id in event_map:
-                        name, severity = event_map[event_id]
-                    else:
-                        name = f"Event ID {event_id}"
-                        severity = 2  # Default medium severity
-                    
-                    message = formatter(event, name)
-                    ip_address = self._extract_ip_from_event(event)
-                    
-                    self.event_model.create_event(
-                        timestamp=datetime.fromtimestamp(event.TimeGenerated.timestamp()).strftime('%Y-%m-%d %H:%M:%S'),
-                        source=source,
-                        event_type=name,
-                        severity=severity,
-                        description=message,
-                        ip_address=ip_address or "N/A"
-                    )
+                    try:
+                        if min_level and event.EventType < min_level:
+                            continue
+                        
+                        event_id = event.EventID & 0xFFFF
+                        
+                        # Special handling for Sysmon events
+                        if source == "Sysmon":
+                            if not hasattr(event, 'StringInserts') or not event.StringInserts:
+                                continue
+                            
+                            # Get the event ID from the second string insert for Sysmon
+                            try:
+                                event_id = int(event.StringInserts[0]) if event.StringInserts else 0
+                            except (ValueError, IndexError):
+                                event_id = 0
+                        
+                        if event_id in event_map:
+                            name, severity = event_map[event_id]
+                        else:
+                            name = f"{source} Event ID {event_id}"
+                            severity = 2  # Default medium severity
+                        
+                        message = formatter(event, name)
+                        ip_address = self._extract_ip_from_event(event)
+                        
+                        # Safely get the timestamp
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        if hasattr(event, 'TimeGenerated'):
+                            try:
+                                timestamp = event.TimeGenerated.Format()
+                            except:
+                                pass
+                                
+                        self.event_model.create_event(
+                            timestamp=timestamp,
+                            source=source,
+                            event_type=name,
+                            severity=severity,
+                            description=message,
+                            ip_address=ip_address or "N/A"
+                        )
+                        
+                    except Exception as e:
+                        print(f"Error processing event in {source} collector: {str(e)}")
+                        import traceback
+                        print(traceback.format_exc())
                 
                 time.sleep(1)
                 
             except Exception as e:
                 print(f"Error in {source} collector: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
                 time.sleep(10)
 
     # Event mapping methods
@@ -307,15 +336,31 @@ class WindowsLogCollector:
     def _get_sysmon_event_map(self):
         return {
             1: ("Process Create", 3),
+            2: ("A process changed a file creation time", 4),
             3: ("Network Connection", 3),
-            6: ("Driver Loaded", 4),
-            7: ("Image Loaded", 3),
+            4: ("Sysmon service state changed", 2),
+            5: ("Process terminated", 2),
+            6: ("Driver loaded", 4),
+            7: ("Image loaded", 3),
             8: ("CreateRemoteThread", 4),
-            10: ("Process Access", 4),
-            11: ("File Create", 3),
-            12: ("Registry Event", 3),
-            13: ("Registry Value Set", 3),
-            15: ("File Create Stream Hash", 3)
+            9: ("RawAccessRead detected", 4),
+            10: ("Process accessed", 4),
+            11: ("File created", 3),
+            12: ("RegistryEvent (Object create and delete)", 3),
+            13: ("RegistryEvent (Value Set)", 3),
+            14: ("RegistryEvent (Key and Value Rename)", 3),
+            15: ("FileCreateStreamHash", 3),
+            16: ("Sysmon config state changed", 2),
+            17: ("Pipe Created", 2),
+            18: ("Pipe Connected", 2),
+            19: ("WmiEvent (WmiEventFilter activity detected)", 4),
+            20: ("WmiEvent (WmiEventConsumer activity detected)", 4),
+            21: ("WmiEvent (WmiEventConsumerToFilter activity detected)", 4),
+            22: ("DNS query", 2),
+            23: ("File Delete", 3),
+            24: ("Clipboard Capture", 3),
+            25: ("Process Tampering", 5),
+            26: ("File Delete Detected", 3)
         }
 
     def _get_defender_event_map(self):
@@ -395,18 +440,248 @@ class WindowsLogCollector:
             return message
         except Exception as e:
             return f"{name} - Error formatting: {str(e)}"
-
-    def _format_sysmon_event(self, event, name):
+            
+    def _format_task_scheduler_event(self, event, name):
         try:
-            message = f"{name}\nComputer: {event.ComputerName}\n"
+            message = f"{name} (Event ID: {event.EventID & 0xFFFF})\n"
+            message += f"Computer: {event.ComputerName}\n"
+            if hasattr(event, 'TimeGenerated'):
+                try:
+                    message += f"Time: {event.TimeGenerated}\n"
+                except:
+                    message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            else:
+                message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                
             if event.StringInserts:
-                message += "Details:\n" + "\n".join(
-                    f"- Field {i}: {value}" 
-                    for i, value in enumerate(event.StringInserts)
-                )
+                message += "Details:\n" + "\n".join(f"- {i}" for i in event.StringInserts)
+                
             return message
         except Exception as e:
             return f"{name} - Error formatting: {str(e)}"
+            
+    def _format_defender_event(self, event, name):
+        try:
+            message = f"{name} (Event ID: {event.EventID & 0xFFFF})\n"
+            message += f"Computer: {event.ComputerName}\n"
+            if hasattr(event, 'TimeGenerated'):
+                try:
+                    message += f"Time: {event.TimeGenerated}\n"
+                except:
+                    message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            else:
+                message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                
+            if event.StringInserts:
+                message += "Details:\n" + "\n".join(f"- {i}" for i in event.StringInserts)
+                
+            return message
+        except Exception as e:
+            return f"{name} - Error formatting: {str(e)}"
+            
+    def _format_gpo_event(self, event, name):
+        try:
+            message = f"{name} (Event ID: {event.EventID & 0xFFFF})\n"
+            message += f"Computer: {event.ComputerName}\n"
+            if hasattr(event, 'TimeGenerated'):
+                try:
+                    message += f"Time: {event.TimeGenerated}\n"
+                except:
+                    message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            else:
+                message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                
+            if event.StringInserts:
+                message += "Details:\n" + "\n".join(f"- {i}" for i in event.StringInserts)
+                
+            return message
+        except Exception as e:
+            return f"{name} - Error formatting: {str(e)}"
+
+    def _format_sysmon_event(self, event, name):
+        try:
+            # Get the actual Sysmon event ID from the first string insert
+            if event.StringInserts and len(event.StringInserts) > 0:
+                try:
+                    sysmon_event_id = int(event.StringInserts[0])
+                except (ValueError, IndexError):
+                    sysmon_event_id = event.EventID & 0xFFFF
+            else:
+                sysmon_event_id = event.EventID & 0xFFFF
+
+            message = f"{name} (Sysmon Event ID: {sysmon_event_id})\n"
+            message += f"Computer: {event.ComputerName}\n"
+            # Safely get the timestamp
+            if hasattr(event, 'TimeGenerated'):
+                try:
+                    message += f"Time: {event.TimeGenerated}\n"
+                except:
+                    message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            else:
+                message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            
+            if not hasattr(event, 'StringInserts') or not event.StringInserts:
+                return message + "No event data available"
+                
+            # Different event types have different field structures
+            if sysmon_event_id == 1:  # Process Create
+                fields = [
+                    "RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                    "FileVersion", "Description", "Product", "Company", "OriginalFileName",
+                    "CommandLine", "CurrentDirectory", "User", "LogonGuid", "LogonId",
+                    "TerminalSessionId", "IntegrityLevel", "Hashes", "ParentProcessGuid",
+                    "ParentProcessId", "ParentImage", "ParentCommandLine"
+                ]
+                details = {}
+                for i in range(1, len(event.StringInserts)):  # Skip first field (event ID)
+                    if i-1 < len(fields):
+                        details[fields[i-1]] = event.StringInserts[i]
+                
+                message += f"Process: {details.get('Image', 'N/A')}\n"
+                message += f"PID: {details.get('ProcessId', 'N/A')}\n"
+                if 'CommandLine' in details:
+                    message += f"Command Line: {details['CommandLine']}\n"
+                message += f"User: {details.get('User', 'N/A')}\n"
+                parent_pid = details.get('ParentProcessId', 'N/A')
+                parent_image = details.get('ParentImage', 'N/A')
+                if parent_pid != 'N/A' or parent_image != 'N/A':
+                    message += f"Parent: {parent_image} (PID: {parent_pid})\n"
+                
+                # Add any additional fields that might be interesting
+                for field in ['Hashes', 'IntegrityLevel', 'LogonId', 'TerminalSessionId']:
+                    if field in details and details[field]:
+                        message += f"{field}: {details[field]}\n"
+            
+            elif sysmon_event_id == 3:  # Network Connection
+                fields = [
+                    "RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                    "User", "Protocol", "Initiated", "SourceIsIpv6", "SourceIp",
+                    "SourceHostname", "SourcePort", "SourcePortName", "DestinationIsIpv6",
+                    "DestinationIp", "DestinationHostname", "DestinationPort", "DestinationPortName"
+                ]
+                details = {}
+                for i in range(1, len(event.StringInserts)):  # Skip first field (event ID)
+                    if i-1 < len(fields):
+                        details[fields[i-1]] = event.StringInserts[i]
+                
+                message += f"Process: {details.get('Image', 'N/A')} (PID: {details.get('ProcessId', 'N/A')})\n"
+                message += f"User: {details.get('User', 'N/A')}\n"
+                src_ip = details.get('SourceIp', 'N/A')
+                src_port = details.get('SourcePort', 'N/A')
+                dst_ip = details.get('DestinationIp', 'N/A')
+                dst_port = details.get('DestinationPort', 'N/A')
+                protocol = details.get('Protocol', 'N/A')
+                
+                message += f"Connection: {src_ip}:{src_port} → {dst_ip}:{dst_port} ({protocol})\n"
+                
+                if 'Initiated' in details:
+                    message += f"Initiated: {details['Initiated']}\n"
+            
+            elif sysmon_event_id == 7:  # Image Loaded
+                fields = [
+                    "RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                    "ImageLoaded", "FileVersion", "Description", "Product", "Company",
+                    "OriginalFileName", "Hashes", "Signed", "Signature"
+                ]
+                details = {}
+                for i in range(1, len(event.StringInserts)):  # Skip first field (event ID)
+                    if i-1 < len(fields):
+                        details[fields[i-1]] = event.StringInserts[i]
+                
+                message += f"Process: {details.get('Image', 'N/A')} (PID: {details.get('ProcessId', 'N/A')})\n"
+                message += f"Image Loaded: {details.get('ImageLoaded', 'N/A')}\n"
+                
+                if 'Company' in details and details['Company']:
+                    message += f"Company: {details['Company']}\n"
+                if 'Hashes' in details and details['Hashes']:
+                    message += f"Hashes: {details['Hashes']}\n"
+                message += f"Signed: {details.get('Signed', 'N/A')}\n"
+                if 'Signature' in details and details['Signature'] != 'N/A':
+                    message += f"Signature: {details['Signature']}\n"
+            
+            elif sysmon_event_id == 11:  # File Created
+                fields = [
+                    "RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                    "TargetFilename", "CreationUtcTime", "User"
+                ]
+                details = {}
+                for i in range(1, len(event.StringInserts)):  # Skip first field (event ID)
+                    if i-1 < len(fields):
+                        details[fields[i-1]] = event.StringInserts[i]
+                
+                message += f"Process: {details.get('Image', 'N/A')} (PID: {details.get('ProcessId', 'N/A')})\n"
+                message += f"File Created: {details.get('TargetFilename', 'N/A')}\n"
+                if 'CreationUtcTime' in details:
+                    message += f"Creation Time: {details['CreationUtcTime']}\n"
+                if 'User' in details:
+                    message += f"User: {details['User']}\n"
+            else:
+                # Default handling for other event types
+                message += "Event Data:\n"
+                for i, value in enumerate(event.StringInserts):
+                    if i == 0:
+                        message += f"  Event ID: {value}\n"
+                    # Try to get field names for known event types
+                    field_names = []
+                    if sysmon_event_id in [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]:
+                        field_names = self._get_sysmon_field_names(sysmon_event_id)
+                    
+                    if i-1 < len(field_names) and i > 0:  # i-1 because we skip event ID
+                        message += f"  {field_names[i-1]}: {value}\n"
+                    elif i > 0:  # Only show non-event ID fields
+                        message += f"  Field {i}: {value}\n"
+            
+            return message.strip()
+            
+        except Exception as e:
+            import traceback
+            return f"{name} - Error formatting: {str(e)}\n{traceback.format_exc()}"
+    
+    def _get_sysmon_field_names(self, event_id):
+        """Return field names for known Sysmon event types"""
+        field_map = {
+            1: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                "FileVersion", "Description", "Product", "Company", "OriginalFileName",
+                "CommandLine", "CurrentDirectory", "User", "LogonGuid", "LogonId",
+                "TerminalSessionId", "IntegrityLevel", "Hashes", "ParentProcessGuid",
+                "ParentProcessId", "ParentImage", "ParentCommandLine"],
+            2: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                "TargetFilename", "CreationUtcTime", "PreviousCreationUtcTime", "User"],
+            3: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                "User", "Protocol", "Initiated", "SourceIsIpv6", "SourceIp",
+                "SourceHostname", "SourcePort", "SourcePortName", "DestinationIsIpv6",
+                "DestinationIp", "DestinationHostname", "DestinationPort", "DestinationPortName"],
+            4: ["RuleName", "UtcTime", "State", "Version", "SchemaVersion",
+                "HashAlgorithms"],
+            5: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                "User"],
+            6: ["RuleName", "UtcTime", "ImageLoaded", "Hashes", "Signed",
+                "Signature"],
+            7: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                "ImageLoaded", "FileVersion", "Description", "Product", "Company",
+                "OriginalFileName", "Hashes", "Signed", "Signature"],
+            8: ["RuleName", "UtcTime", "SourceProcessGuid", "SourceProcessId",
+                "SourceImage", "TargetProcessGuid", "TargetProcessId", "TargetImage",
+                "NewThreadId", "StartAddress", "StartModule", "StartFunction"],
+            9: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                "Device"],
+            10: ["RuleName", "UtcTime", "SourceProcessGUID", "SourceProcessId",
+                 "SourceThreadId", "SourceImage", "TargetProcessGUID", "TargetProcessId",
+                 "TargetImage", "GrantedAccess", "CallTrace"],
+            11: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                 "TargetFilename", "CreationUtcTime", "User"],
+            12: ["RuleName", "UtcTime", "EventType", "ProcessGuid", "ProcessId",
+                 "Image", "TargetObject", "Details"],
+            13: ["RuleName", "UtcTime", "EventType", "ProcessGuid", "ProcessId",
+                 "Image", "TargetObject", "Details"],
+            14: ["RuleName", "UtcTime", "EventType", "ProcessGuid", "ProcessId",
+                 "Image", "TargetObject", "NewName"],
+            15: ["RuleName", "UtcTime", "ProcessGuid", "ProcessId", "Image",
+                 "TargetFilename", "Hashes", "Contents"],
+            16: ["RuleName", "UtcTime", "Configuration", "ConfigurationFileHash"]
+        }
+        
+        return field_map.get(event_id, [])
 
     def _process_firewall_log(self, line):
         if not line or line.startswith('#'):

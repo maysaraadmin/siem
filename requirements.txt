@@ -1,0 +1,3 @@
+pywin32>=300
+python-dateutil>=2.8.2
+pypiwin32>=223
